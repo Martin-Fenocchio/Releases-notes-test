@@ -1,0 +1,93 @@
+name: Generate Release Notes
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+jobs:
+  release-notes:
+    # Only run on pushes or merged PRs (avoids duplicates)
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history to ensure we can compare commits
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Determine Commit Range
+        id: range
+        run: |
+          # Default values
+          BEFORE_SHA=""
+          AFTER_SHA="${{ github.sha }}"
+          
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            # For merged PRs
+            BEFORE_SHA="${{ github.event.pull_request.base.sha }}"
+            AFTER_SHA="${{ github.event.pull_request.head.sha }}"
+            echo "Pull Request Merge detected: $BEFORE_SHA..$AFTER_SHA"
+          elif [ "${{ github.event_name }}" == "push" ]; then
+            BEFORE_SHA="${{ github.event.before }}"
+            
+            # Handle new branch/force push (0000000...)
+            if [ "$BEFORE_SHA" == "0000000000000000000000000000000000000000" ]; then
+              # Try to get the previous commit from git log
+              BEFORE_SHA=$(git rev-parse HEAD~1 2>/dev/null || echo "")
+              echo "New branch/Force push detected. Fallback to parent: $BEFORE_SHA"
+            else
+              echo "Push detected: $BEFORE_SHA..$AFTER_SHA"
+            fi
+          fi
+          
+          # Validate SHAs
+          if [ -z "$BEFORE_SHA" ] || [ -z "$AFTER_SHA" ] || [ "$BEFORE_SHA" == "$AFTER_SHA" ]; then
+            echo "Error: Invalid commit range or no changes ($BEFORE_SHA..$AFTER_SHA)."
+            echo "valid=false" >> $GITHUB_OUTPUT
+          else
+            echo "before=$BEFORE_SHA" >> $GITHUB_OUTPUT
+            echo "after=$AFTER_SHA" >> $GITHUB_OUTPUT
+            echo "valid=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate Release Notes
+        if: steps.range.outputs.valid == 'true'
+        env:
+          OPENAI_TOKEN: ${{ secrets.OPENAI_TOKEN }}
+          SLACK_TOKEN: ${{ secrets.SLACK_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Validate required secrets
+          if [ -z "$OPENAI_TOKEN" ]; then
+            echo "Error: OPENAI_TOKEN secret is not set."
+            exit 1
+          fi
+
+          echo "Installing Release Notes Bot..."
+          npm install -g @litebox-packages/release-notes-bot@latest
+
+          echo "Running Release Notes Bot..."
+          release-notes-bot \
+            --platform github \
+            --before "${{ steps.range.outputs.before }}" \
+            --after "${{ steps.range.outputs.after }}" \
+            --owner "${{ github.repository_owner }}" \
+            --repo "${{ github.event.repository.name }}" \
+            --token "$GITHUB_TOKEN" \
+            --openaiToken "$OPENAI_TOKEN" \
+            --slackToken "$SLACK_TOKEN" \
+            --slackChannelId "$SLACK_CHANNEL_ID"
